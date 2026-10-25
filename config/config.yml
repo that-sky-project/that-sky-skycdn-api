@@ -1,0 +1,112 @@
+# XYSKY Resource CDN API.
+#
+# Data plane (used by the game client, resolved from the token returned by the
+# game server's POST /service/auth/api/v1/token). The client sends POST; GET is
+# also accepted for debugging:
+#
+#   POST https://<cdn.host>/manifest
+#   GET  https://<cdn.host>/resources/<40-hex-sha1>
+#   Authentication: Bearer <token>       (token issued by POST /api/v1/token)
+#   X-CDN-Prefix: <cdn.prefix>
+#
+# Control plane (used by the game server, authenticated with cdn.apiKey):
+#
+#   POST /token  { "user_id": "<uuid>" }
+#   X-API-Key: <cdn.apiKey>
+#   -> { token, expires_at }
+#
+# The game server composes the client response { host, prefix, token } using its
+# own cdn.host / cdn.prefix, so this service does not need to know its public
+# domain.
+#
+# The client always uses https on port 443, so this service normally runs
+# behind a TLS-terminating reverse proxy (nginx/caddy) — see README.md.
+
+server:
+  host: "0.0.0.0"
+  port: 25570
+
+  # Optional direct TLS. Leave disabled when a reverse proxy terminates TLS;
+  # the client only accepts a certificate it trusts, so self-signed certs are
+  # not usable unless the client machine trusts them.
+  tls:
+    enabled: false
+    cert: "./data/ssl/fullchain.pem"
+    key: "./data/ssl/privkey.pem"
+
+cdn:
+  # Sent to the client as X-CDN-Prefix (and required on data-plane requests
+  # when `requirePrefix` is true). The public host is configured on the game
+  # server (`cdn.host` in the game server's config/config.yml).
+  prefix: ""
+
+  # Internal HS256 secret used to sign and verify resource tokens. It never
+  # leaves this service — the game server obtains tokens from POST /token
+  # instead of signing them itself.
+  tokenSecret: "fcdc44b3f5091e2f750bad171230b1c0062521b444e372d583fee2f5faee6305"
+
+  # Lifetime of an issued resource token, in seconds. The client requests a
+  # token once per session and may keep downloading for a while on a slow link,
+  # so this is deliberately generous (default 24h).
+  tokenTtlSeconds: 86400
+
+  # `env` claim embedded in the token.
+  env: "Beta"
+
+  # Reject data-plane requests whose X-CDN-Prefix does not equal `cdn.prefix`.
+  requirePrefix: false
+
+  # Server-to-server API key. The game server sends it as `X-API-Key` when it
+  # calls POST /token. Must equal `cdn.apiKey` in the game server's
+  # config/config.yml. Empty = the endpoint accepts any caller (dev only).
+  apiKey: "test"
+
+manifest:
+  # Base manifest to merge. Copy the client's ROM manifest here, e.g.
+  #   <Steam>/steamapps/common/Sky Children of the Light/data/assets/initial/Data/Manifests/win/resource.manifest
+  # Without it the CDN only serves the overlay entries declared under content/,
+  # which makes the client treat every ROM file as "not in the manifest".
+  base: "./data/base/resource.manifest"
+
+  # Overlay content root. Files are laid out as <category>/<name>, mirroring
+  # the game's assets tree, e.g.:
+  #   content/initial/Data/Shaders/Bin/Foo.fs.spv      -> initial / Data/Shaders/Bin/Foo.fs.spv
+  #   content/meshes/Data/Meshes/Bin/Bar_01.mesh       -> meshes  / Data/Meshes/Bin/Bar_01.mesh
+  content: "./content"
+
+  # Category used for files whose first path segment is not a known category.
+  defaultCategory: "initial"
+
+  # Known categories (the first path segment under content/). Merged with the
+  # categories found in the base manifest.
+  categories:
+  - "initial"
+  - "meshes"
+  - "audioExtra"
+  - "images"
+  - "dawn"
+  - "dusk"
+  - "night"
+  - "sunset"
+  - "rain"
+  - "storm"
+  - "prairie"
+  # Header buildCL. 0 = base.buildCL + 1 (must be greater than the client's ROM
+  # buildCL for the downloaded manifest to be preferred on the next launch).
+  buildCL: 0
+
+  # Header resourceHash. 0 = derived from the entry table (changes whenever the
+  # entry set changes).
+  resourceHash: 0
+
+  # Where `npm run build` writes the generated manifest.
+  output: "./data/manifests/default/resource.manifest"
+
+assets:
+  # Optional: the game's `data/assets` directory. When set, base-manifest entries
+  # are served from disk too, so a client with a wiped cache can re-download the
+  # original game resources from this CDN.
+  dir: "D:/SteamLibrary/steamapps/common/Sky Children of the Light/data/assets"
+
+logging:
+  level: "info"

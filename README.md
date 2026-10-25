@@ -26,10 +26,6 @@
 | `cdn.apiKey` | 游戏服 `cdn.apiKey` **与** cdnapi `cdn.apiKey` | 游戏服调用 `POST /token` 的服务间鉴权（`X-API-Key`） |
 | `cdn.tokenSecret` | 只在 cdnapi | cdnapi 自己签发/校验玩家资源 token（HS256），**不下发、不共享** |
 
-游戏服不再自己签 token：它在 `/service/auth/api/v1/token` 里向 cdnapi 要一份，然后把
-**自己的** `cdn.host` / `cdn.prefix` 和这份 token 组合成客户端要的
-`{ host, prefix, token, status: "OK" }`。cdnapi 不需要知道自己的公网域名。
-
 ---
 
 ## 2. 快速开始
@@ -63,7 +59,6 @@ npm start
 
 ```yaml
 cdn:
-  # 唯一域名：客户端取资源、游戏服取 token 都用它（裸主机名）
   host: "cdn.example.com"
   prefix: ""
   apiKey: "<与 cdnapi 的 cdn.apiKey 相同>"
@@ -292,9 +287,7 @@ cdnapi/
   src/token.js           token 签发 / apiKey / Bearer 校验
   src/http/routes.js     POST /token、/manifest、/resources/:hash、/health
   src/app.js             启动
-  tools/build.js         构建 / --inspect / --blobs
   content/               自定义资源
-  test/                  node:test
 ```
 
 ## 10. 已知边界

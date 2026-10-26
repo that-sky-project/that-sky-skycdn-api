@@ -176,14 +176,33 @@ function discoverPlatforms(config, logger) {
   return [...found];
 }
 
-/** Per-platform game assets tree, falling back to the global `assets.dir`. */
-function assetsDirFor(config, platform) {
+/**
+ * Per-platform game assets tree, falling back to the global `assets.dir`.
+ *
+ * A path that does not exist (typical when the config is shared between a
+ * Windows host and a Linux container) is dropped instead of being resolved
+ * against the process cwd: `path.resolve` would turn it into `<cwd>/D:/...`
+ * and the type=2 downgrade below would silently look correct for the wrong
+ * reason.
+ */
+function assetsDirFor(config, platform, logger) {
   const platforms = config.assets.platforms || {};
-  return platforms[platform] || config.assets.dir || '';
+  const value = platforms[platform] || config.assets.dir || '';
+  if (!value) return '';
+  if (!fs.existsSync(value)) {
+    logger.warn(
+      'assets dir not found, ROM resources are not re-served',
+      platform,
+      value,
+      '(base entries of type 2 are downgraded to 0)'
+    );
+    return '';
+  }
+  return value;
 }
 
 function buildPlatformStore(config, platform, base, overlay, contentRootValue, logger) {
-  const assetsDir = assetsDirFor(config, platform);
+  const assetsDir = assetsDirFor(config, platform, logger);
 
   // Merge by name: the client indexes entries by FNV-1a(name), so a name must
   // resolve to exactly one entry. Overlay entries replace base entries.
@@ -268,6 +287,7 @@ function buildPlatformStore(config, platform, base, overlay, contentRootValue, l
       entries: entries.length,
       baseEntries: base ? base.entries.length : 0,
       overlayEntries: overlay.length,
+      imageFormat: imageFormatFor(base) || null,
       content: contentRootValue || null,
       assetsDir: assetsDir || null,
     })

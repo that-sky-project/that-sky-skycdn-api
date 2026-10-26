@@ -18,7 +18,7 @@ function createApp(options = {}) {
   app.disable('x-powered-by');
   // The service normally sits behind nginx/caddy; req.ip is only used for logs.
   app.set('trust proxy', true);
-  app.use(requestLogger(logger));
+  app.use(requestLogger(logger, stores));
   app.use(express.json({ limit: '16kb' }));
   app.use(createRoutes({ config, stores, logger }));
 

@@ -74,7 +74,7 @@ manifest:
   defaultPlatform: "win"
 
   # Extra platforms to load. Empty = discovered from <base>/<platform>/.
-  platforms: []
+  platforms: [ "android" ]
 
   # Overlay content root, shared by every platform:
   #   <content>/<category>/<name>

@@ -31,7 +31,12 @@ function readBaseManifest(filePath, logger) {
   try {
     return parseManifest(fs.readFileSync(filePath));
   } catch (error) {
-    logger.error('Failed to parse base manifest', filePath, error.message);
+    logger.error(
+      'Failed to parse base manifest',
+      filePath,
+      error.message,
+      '(re-copy the ROM manifest; the file is corrupt or truncated)'
+    );
     throw error;
   }
 }
@@ -57,12 +62,12 @@ function scanOverlay(root, categories, config, logger) {
   }
 
   const files = walkFiles(root);
-  const entries = [];
+  const records = [];
   for (const file of files) {
     if (path.basename(file.rel).toLowerCase() === 'readme.md') continue;
     const identity = classify(file.rel, categories, config.manifest.defaultCategory);
     const body = fs.readFileSync(file.abs);
-    entries.push({
+    records.push({
       ...identity,
       hash: sha1(body),
       timestamp: Math.floor(fs.statSync(file.abs).mtimeMs / 1000),
@@ -74,9 +79,52 @@ function scanOverlay(root, categories, config, logger) {
     });
   }
 
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  logger.info(`Scanned ${entries.length} overlay file(s)`, root);
-  return entries;
+  records.sort((a, b) => a.name.localeCompare(b.name));
+  logger.info(`Scanned ${records.length} overlay file(s)`, root);
+  return records;
+}
+
+/** Texture format used by a platform base manifest (BC on desktop, ETC2 on Android). */
+function imageFormatFor(base) {
+  if (!base) return '';
+  for (const entry of base.entries) {
+    if (entry.name.startsWith('Data/Images/Bin/BC/')) return 'BC';
+    if (entry.name.startsWith('Data/Images/Bin/ETC2/')) return 'ETC2';
+  }
+  return '';
+}
+
+/**
+ * Select the overlay entries for one platform.
+ *
+ *   <name>.<platform>   platform-specific variant of <name> (Android-baked
+ *                       meshes share the manifest name but not the bytes)
+ *   Bin/BC vs Bin/ETC2  images only for the platform's texture format
+ *
+ * A platform variant always wins over the shared file.
+ */
+function overlayForPlatform(records, platform, platforms, imageFormat) {
+  const chosen = new Map();
+  for (const record of records) {
+    let name = record.name;
+    let variant = '';
+    for (const candidate of platforms) {
+      if (name.endsWith(`.${candidate}`)) {
+        variant = candidate;
+        name = name.slice(0, -(candidate.length + 1));
+        break;
+      }
+    }
+    if (variant && variant !== platform) continue;
+    if (!variant && imageFormat) {
+      if (name.includes('/Bin/BC/') && imageFormat !== 'BC') continue;
+      if (name.includes('/Bin/ETC2/') && imageFormat !== 'ETC2') continue;
+    }
+    const previous = chosen.get(name);
+    if (previous && !variant) continue; // the platform variant wins
+    chosen.set(name, { ...record, name });
+  }
+  return [...chosen.values()];
 }
 
 /** `<base>/<platform>/resource.manifest`; legacy single-file layouts still work. */
@@ -128,7 +176,15 @@ function discoverPlatforms(config, logger) {
   return [...found];
 }
 
+/** Per-platform game assets tree, falling back to the global `assets.dir`. */
+function assetsDirFor(config, platform) {
+  const platforms = config.assets.platforms || {};
+  return platforms[platform] || config.assets.dir || '';
+}
+
 function buildPlatformStore(config, platform, base, overlay, contentRootValue, logger) {
+  const assetsDir = assetsDirFor(config, platform);
+
   // Merge by name: the client indexes entries by FNV-1a(name), so a name must
   // resolve to exactly one entry. Overlay entries replace base entries.
   const byName = new Map();
@@ -142,10 +198,10 @@ function buildPlatformStore(config, platform, base, overlay, contentRootValue, l
   for (const entry of entries) {
     if (entry.type !== 2) continue;
     if (overlayHashes.has(entry.hash.toString('hex'))) continue;
-    if (config.assets.dir) {
-      const candidate = path.resolve(config.assets.dir, entry.category, entry.name);
+    if (assetsDir) {
+      const candidate = path.resolve(assetsDir, entry.category, entry.name);
       if (
-        candidate.startsWith(path.resolve(config.assets.dir) + path.sep) &&
+        candidate.startsWith(path.resolve(assetsDir) + path.sep) &&
         fs.existsSync(candidate)
       ) {
         continue;
@@ -184,7 +240,6 @@ function buildPlatformStore(config, platform, base, overlay, contentRootValue, l
     }
   }
 
-  const assetsDir = config.assets.dir;
   function resolve(hash) {
     const key = String(hash || '').toLowerCase();
     if (!HASH_RE.test(key)) return null;
@@ -214,6 +269,7 @@ function buildPlatformStore(config, platform, base, overlay, contentRootValue, l
       baseEntries: base ? base.entries.length : 0,
       overlayEntries: overlay.length,
       content: contentRootValue || null,
+      assetsDir: assetsDir || null,
     })
   );
 
@@ -259,17 +315,36 @@ function createStores(config, logger) {
     }
   }
 
+  // Without a base the manifest only has overlay entries and derives buildCL=1,
+  // which is lower than any ROM buildCL: clients would ignore it and the CDN
+  // would silently do nothing. Fail fast unless an explicit buildCL was set.
+  const missingBases = platforms.filter((platform) => !bases.get(platform));
+  if (missingBases.length > 0 && config.manifest.buildCL === 0) {
+    const files = missingBases.map(
+      (platform) =>
+        baseFileFor(config, platform) || path.join(config.manifest.base || './data/base', platform, 'resource.manifest')
+    );
+    throw new Error(
+      `base manifest missing for platform(s) ${missingBases.join(', ')}: ${files.join(', ')}. ` +
+        'Copy the ROM manifest(s) there, or set manifest.buildCL to run overlay-only.'
+    );
+  }
+
   // Categories from every base manifest are needed before scanning the shared
   // overlay, so the build is split into two passes.
   const root = contentRoot(config);
-  const overlay = scanOverlay(root, categories, config, logger);
+  const overlayRecords = scanOverlay(root, categories, config, logger);
 
   const stores = new Map();
   for (const platform of platforms) {
-    stores.set(
+    const base = bases.get(platform) || null;
+    const overlay = overlayForPlatform(
+      overlayRecords,
       platform,
-      buildPlatformStore(config, platform, bases.get(platform) || null, overlay, root, logger)
+      platforms,
+      imageFormatFor(base)
     );
+    stores.set(platform, buildPlatformStore(config, platform, base, overlay, root, logger));
   }
 
   const configuredDefault = normalizePlatform(config.manifest.defaultPlatform) || 'win';
@@ -282,6 +357,21 @@ function createStores(config, logger) {
     if (missingWarned.has(hash)) return;
     missingWarned.add(hash);
     logger.warn('Resource not available on this CDN', hash);
+  }
+
+  // hash -> manifest name, for request logs (diagnosing repeated downloads).
+  const hashNames = new Map();
+  for (const store of stores.values()) {
+    for (const entry of store.overlay) {
+      const key = entry.hash.toString('hex');
+      if (!hashNames.has(key)) hashNames.set(key, entry.name);
+    }
+    if (store.base) {
+      for (const entry of store.base.entries) {
+        const key = entry.hash.toString('hex');
+        if (!hashNames.has(key)) hashNames.set(key, entry.name);
+      }
+    }
   }
 
   function get(platform) {
@@ -306,6 +396,9 @@ function createStores(config, logger) {
     },
     resolve,
     warnMissing,
+    nameFor(hash) {
+      return hashNames.get(String(hash || '').toLowerCase()) || '';
+    },
   };
 }
 

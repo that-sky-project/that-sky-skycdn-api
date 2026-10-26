@@ -46,7 +46,10 @@ const configSchema = z.looseObject({
     output: z.string().default('./data/manifests'),
   }).prefault({}),
   assets: z.looseObject({
+    // Default game `data/assets` tree used to serve base-manifest blobs.
     dir: z.string().default(''),
+    // Optional per-platform overrides, e.g. { android: "/srv/android/data/assets" }.
+    platforms: z.record(z.string(), z.string()).default({}),
   }).prefault({}),
   logging: z.looseObject({
     level: z.string().default('info'),
@@ -85,6 +88,12 @@ function loadConfig(filePath = path.join(ROOT, 'config', 'config.yml')) {
   config.manifest.content = resolvePath(config.manifest.content, './content');
   config.manifest.output = resolvePath(config.manifest.output, './data/manifests');
   config.assets.dir = resolvePath(config.assets.dir);
+  config.assets.platforms = Object.fromEntries(
+    Object.entries(config.assets.platforms || {}).map(([platform, dir]) => [
+      String(platform).trim().toLowerCase(),
+      resolvePath(dir),
+    ])
+  );
   return config;
 }
 

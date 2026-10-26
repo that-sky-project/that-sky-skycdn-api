@@ -4,12 +4,14 @@ const express = require('express');
 const { createTokenVerifier, createApiKeyAuth, issueResourceToken, normalizePlatform } = require('../token');
 const { HASH_RE, normalizePlatform: normalizeStorePlatform } = require('../store');
 
-function requestLogger(logger) {
+function requestLogger(logger, stores) {
   return (req, res, next) => {
     const startedAt = process.hrtime.bigint();
     res.on('finish', () => {
       const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
       const token = req.cdnToken;
+      const hash = /^\/resources\/([0-9a-fA-F]{40})/.exec(req.originalUrl);
+      const name = hash && stores ? stores.nameFor(hash[1]) : '';
       logger.info(
         'request',
         `${req.method} ${req.originalUrl}`,
@@ -18,7 +20,9 @@ function requestLogger(logger) {
         `ip=${req.ip}`,
         `prefix=${req.get('x-cdn-prefix') || ''}`,
         `platform=${token?.platform || '-'}`,
-        `sub=${token?.sub || '-'}`
+        `sub=${token?.sub || '-'}`,
+        `range=${req.get('range') || '-'}`,
+        ...(name ? [`name=${name}`] : [])
       );
     });
     next();
@@ -109,6 +113,13 @@ function createRoutes({ config, stores, logger }) {
 
     const { buildCL, resourceHash, length } = store.manifest;
     const etag = `"${store.platform}-m${buildCL}-${resourceHash.toString(16)}-${length}"`;
+    logger.info(
+      'Serving manifest',
+      `platform=${store.platform}`,
+      `buildCL=${buildCL}`,
+      `hash=R${resourceHash.toString(16)}`,
+      `inm=${req.get('if-none-match') || '-'}`
+    );
     res.set('Content-Type', 'application/octet-stream');
     res.set('Cache-Control', 'no-cache');
     res.set('ETag', etag);

@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * Resource manifest ("TGCManifest") binary format, version 3 — the format the
  * 0.35.1 client requires (older builds used version 1, which differs only in

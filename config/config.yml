@@ -62,23 +62,31 @@ cdn:
   apiKey: "test"
 
 manifest:
-  # Base manifest to merge. Copy the client's ROM manifest here, e.g.
-  #   <Steam>/steamapps/common/Sky Children of the Light/data/assets/initial/Data/Manifests/win/resource.manifest
-  # Without it the CDN only serves the overlay entries declared under content/,
-  # which makes the client treat every ROM file as "not in the manifest".
-  base: "./data/base/resource.manifest"
+  # Per-platform ROM baselines:
+  #   <base>/<platform>/resource.manifest
+  # Copy each client's ROM manifest there (win / android / ios ...). Without a
+  # baseline the CDN only serves overlay entries, which makes the client treat
+  # every ROM file as "not in the manifest".
+  base: "./data/base"
 
-  # Overlay content root. Files are laid out as <category>/<name>, mirroring
-  # the game's assets tree, e.g.:
-  #   content/initial/Data/Shaders/Bin/Foo.fs.spv      -> initial / Data/Shaders/Bin/Foo.fs.spv
-  #   content/meshes/Data/Meshes/Bin/Bar_01.mesh       -> meshes  / Data/Meshes/Bin/Bar_01.mesh
+  # Platform used when the token has no platform claim (older game servers) or
+  # an unknown one.
+  defaultPlatform: "win"
+
+  # Extra platforms to load. Empty = discovered from <base>/<platform>/.
+  platforms: []
+
+  # Overlay content root, shared by every platform:
+  #   <content>/<category>/<name>
+  # mirroring the game's assets tree, e.g.
+  #   content/initial/Data/Shaders/Bin/Foo.fs.spv
   content: "./content"
 
   # Category used for files whose first path segment is not a known category.
   defaultCategory: "initial"
 
-  # Known categories (the first path segment under content/). Merged with the
-  # categories found in the base manifest.
+  # Known categories (the first path segment under <content>/<platform>/).
+  # Merged with the categories found in the base manifest.
   categories:
   - "initial"
   - "meshes"
@@ -91,16 +99,17 @@ manifest:
   - "rain"
   - "storm"
   - "prairie"
-  # Header buildCL. 0 = base.buildCL + 1 (must be greater than the client's ROM
-  # buildCL for the downloaded manifest to be preferred on the next launch).
+  # Header buildCL. 0 = per-platform base.buildCL + 1 (must be greater than the
+  # client's ROM buildCL for the downloaded manifest to be preferred on the
+  # next launch).
   buildCL: 0
 
   # Header resourceHash. 0 = derived from the entry table (changes whenever the
   # entry set changes).
   resourceHash: 0
 
-  # Where `npm run build` writes the generated manifest.
-  output: "./data/manifests/default/resource.manifest"
+  # Directory written by `npm run build` (one subdirectory per platform).
+  output: "./data/manifests"
 
 assets:
   # Optional: the game's `data/assets` directory. When set, base-manifest entries

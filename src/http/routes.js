@@ -1,6 +1,8 @@
+'use strict';
+
 const express = require('express');
-const { createTokenVerifier, createApiKeyAuth, issueResourceToken } = require('../token');
-const { HASH_RE } = require('../store');
+const { createTokenVerifier, createApiKeyAuth, issueResourceToken, normalizePlatform } = require('../token');
+const { HASH_RE, normalizePlatform: normalizeStorePlatform } = require('../store');
 
 function requestLogger(logger) {
   return (req, res, next) => {
@@ -15,6 +17,7 @@ function requestLogger(logger) {
         `ms=${elapsedMs.toFixed(1)}`,
         `ip=${req.ip}`,
         `prefix=${req.get('x-cdn-prefix') || ''}`,
+        `platform=${token?.platform || '-'}`,
         `sub=${token?.sub || '-'}`
       );
     });
@@ -22,10 +25,12 @@ function requestLogger(logger) {
   };
 }
 
-function createRoutes({ config, store, logger }) {
+function createRoutes({ config, stores, logger }) {
   const router = express.Router();
   const verifyToken = createTokenVerifier(config, logger);
   const verifyApiKey = createApiKeyAuth(config, logger);
+  const defaultStore = stores.get(stores.defaultPlatform);
+  const unknownPlatforms = new Set();
 
   // Optional hard requirement on the environment prefix advertised by the game
   // server. Off by default; the header is still logged.
@@ -41,10 +46,22 @@ function createRoutes({ config, store, logger }) {
   router.get('/health', (req, res) => {
     res.json({
       ok: true,
-      ...store.summary,
-      entries: store.entries.length,
-      overlayEntries: store.overlay.length,
-      baseEntries: store.base ? store.base.entries.length : 0,
+      ...defaultStore.summary,
+      entries: defaultStore.entries.length,
+      overlayEntries: defaultStore.overlay.length,
+      baseEntries: defaultStore.base ? defaultStore.base.entries.length : 0,
+      defaultPlatform: stores.defaultPlatform,
+      platforms: Object.fromEntries(
+        [...stores.stores].map(([platform, store]) => [
+          platform,
+          {
+            ...store.summary,
+            entries: store.entries.length,
+            overlayEntries: store.overlay.length,
+            baseEntries: store.base ? store.base.entries.length : 0,
+          },
+        ])
+      ),
     });
   });
 
@@ -55,30 +72,47 @@ function createRoutes({ config, store, logger }) {
     if (!userId || userId.length > 100) {
       return res.status(400).json({ error: 'invalid_user_id' });
     }
+    // Extracted from the client User-Agent by the game server. Unknown values
+    // are dropped rather than failing the login.
+    const platform = normalizePlatform(req.body?.platform);
 
     let issued;
     try {
-      issued = issueResourceToken(config, userId);
+      issued = issueResourceToken(config, userId, { platform });
     } catch (error) {
       logger.error('Failed to issue resource token', error.message);
       return res.status(500).json({ error: 'token_unavailable' });
     }
 
-    logger.info('Issued resource token', `sub=${userId}`, `exp=${issued.expiresAt}`);
+    logger.info(
+      'Issued resource token',
+      `sub=${userId}`,
+      `platform=${issued.platform || '-'}`,
+      `exp=${issued.expiresAt}`
+    );
     return res.json({
       token: issued.token,
       expires_at: issued.expiresAt,
+      platform: issued.platform,
     });
   });
 
   // The 0.35.1 client uses POST for /manifest and GET for /resources/<sha1>.
   // Both methods are accepted on both endpoints for curl/browser debugging.
   function handleManifest(req, res) {
+    const requested = normalizeStorePlatform(req.cdnToken?.platform);
+    const store = stores.get(requested);
+    if (requested && !stores.has(requested) && !unknownPlatforms.has(requested)) {
+      unknownPlatforms.add(requested);
+      logger.warn('Unknown platform, serving the default manifest', requested, stores.defaultPlatform);
+    }
+
     const { buildCL, resourceHash, length } = store.manifest;
-    const etag = `"m${buildCL}-${resourceHash.toString(16)}-${length}"`;
+    const etag = `"${store.platform}-m${buildCL}-${resourceHash.toString(16)}-${length}"`;
     res.set('Content-Type', 'application/octet-stream');
     res.set('Cache-Control', 'no-cache');
     res.set('ETag', etag);
+    res.set('X-CDN-Platform', store.platform);
 
     if ((req.get('if-none-match') || '') === etag) {
       return res.status(304).end();
@@ -92,9 +126,9 @@ function createRoutes({ config, store, logger }) {
       return res.status(404).json({ error: 'not_found' });
     }
 
-    const filePath = store.resolve(hash);
+    const filePath = stores.resolve(hash);
     if (!filePath) {
-      store.warnMissing(hash);
+      stores.warnMissing(hash);
       return res.status(404).json({ error: 'not_found' });
     }
 
@@ -109,7 +143,7 @@ function createRoutes({ config, store, logger }) {
       (error) => {
         if (!error) return;
         if (error.code === 'ENOENT') {
-          store.warnMissing(hash);
+          stores.warnMissing(hash);
           if (!res.headersSent) res.status(404).json({ error: 'not_found' });
           return;
         }

@@ -34,18 +34,20 @@
 cd cdnapi
 cnpm install
 
-# 1) base manifest（客户端自带的 ROM 清单）
+# 1) base manifest（每个平台一份 ROM 清单）
 #    Windows Steam 默认：
 #    <Steam>/steamapps/common/Sky Children of the Light/data/assets/initial/Data/Manifests/win/resource.manifest
 #    建议复制一份再引用：客户端同步成功后会覆盖游戏目录里的那份。
-mkdir -p data/base
-cp "<Steam>/steamapps/common/Sky Children of the Light/data/assets/initial/Data/Manifests/win/resource.manifest" data/base/resource.manifest
+mkdir -p data/base/win
+cp "<Steam>/steamapps/common/Sky Children of the Light/data/assets/initial/Data/Manifests/win/resource.manifest" data/base/win/resource.manifest
+#    其它平台同理（data/base/android/resource.manifest ...）；没有的平台回落到 defaultPlatform
 
 # 2) 编辑 config/config.yml
 #    cdn.tokenSecret / cdn.apiKey 必填（公网 host 在游戏服配）
 
-# 3) （可选）放自定义资源到 content/<category>/<name>
+# 3) （可选）放自定义资源到共享的 content/<category>/<name>
 #    例：content/initial/Data/Shaders/Bin/Foo.fs.spv
+#    内容不分平台，所有平台清单都会合并同一份 content
 
 # 4) 构建并检查
 npm run build
@@ -59,6 +61,7 @@ npm start
 
 ```yaml
 cdn:
+  # 唯一域名：客户端取资源、游戏服取 token 都用它（裸主机名）
   host: "cdn.example.com"
   prefix: ""
   apiKey: "<与 cdnapi 的 cdn.apiKey 相同>"
@@ -159,8 +162,9 @@ content/
 - 每个文件：`pathHash = SHA1(内容)`，`compressedSize = size = 字节数`。
 - 与 base 清单按 `name` 合并：同名覆盖，新名字追加。
 
-`manifest.base` 强烈建议配置：只发覆盖条目时，客户端会把 ROM 里有、清单里没有的文件
-视为“不在清单中”。
+`manifest.base` 是平台根目录：启动时读取 `<base>/<platform>/resource.manifest`。
+`POST /manifest` 按资源 token 里的 `platform` claim 选清单；没有 claim（旧游戏服）或
+平台没有对应 base 时使用 `manifest.defaultPlatform`。内容目录是共享的。
 
 `assets.dir` 可选：指向游戏的 `data/assets`。这样 base 条目也能从本 CDN 回源
 （`<assets>/<category>/<name>`），缓存被清空的客户端可以完整重下。
@@ -176,16 +180,18 @@ POST /token
 X-API-Key: <cdn.apiKey>
 Content-Type: application/json
 
-{ "user_id": "79a9c25c-be60-4da5-9f80-ea24c04cd268" }
+{ "user_id": "79a9c25c-be60-4da5-9f80-ea24c04cd268", "platform": "win" }
 ```
 
 ```json
-{ "token": "eyJ…", "expires_at": 1792953803 }
+{ "token": "eyJ…", "expires_at": 1792953803, "platform": "win" }
 ```
 
 - `cdn.apiKey` 为空时接口开放（仅调试）；
 - `cdn.tokenSecret` 为空则无法签发，返回 500；
-- token claims：`{ env, purpose: ["resources"], sub, iat, exp }`；
+- `platform` 由游戏服从客户端 `User-Agent` 提取（`com.tgc.sky.win` → `win`，
+  `com.tgc.sky.android` → `android`），未知值会被丢弃；
+- token claims：`{ env, purpose: ["resources"], sub, platform?, iat, exp }`；
 - 游戏服拿到后，用自己的 `cdn.host` / `cdn.prefix` 组合成
   `{ host, prefix, token, status: "OK" }` 再返回给客户端。
 
@@ -195,6 +201,8 @@ Content-Type: application/json
 > 方便用 curl/浏览器调试。
 
 校验 `Authentication: Bearer <token>`（`purpose` 必须含 `resources`，`env` 匹配）。
+`/manifest` 用 token 里的 `platform` 选择对应清单，响应头 `X-CDN-Platform` 是实际使用的
+平台；`/resources/:hash` 是内容寻址，跨平台共用。
 `cdn.requirePrefix: true` 时还要求 `X-CDN-Prefix == cdn.prefix`。
 
 ### GET /health
@@ -287,11 +295,14 @@ cdnapi/
   src/token.js           token 签发 / apiKey / Bearer 校验
   src/http/routes.js     POST /token、/manifest、/resources/:hash、/health
   src/app.js             启动
+  tools/build.js         构建 / --inspect / --blobs
   content/               自定义资源
+  test/                  node:test
 ```
 
 ## 10. 已知边界
 
-- 只实现单份清单；多版本分流需要按 `X-CDN-Prefix` 扩展。
+- 清单按平台分开（`data/base/<platform>/resource.manifest`），内容目录共享
+  （`content/<category>/<name>`）；同一平台内多版本分流仍需按 `X-CDN-Prefix` 扩展。
 - `manifest.base` 必须是 0.35.1（v3）清单；0.15.1 的 v1 清单会在版本校验处被拒。
 - 资源按原始字节下发；二进制里没有 lz4/zstd/oodle 的容器级解压逻辑。

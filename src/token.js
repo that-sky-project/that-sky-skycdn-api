@@ -1,3 +1,5 @@
+'use strict';
+
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 
@@ -29,17 +31,35 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(left, right);
 }
 
-function issueResourceToken(config, userId) {
+const PLATFORM_RE = /^[a-z0-9_-]{1,32}$/;
+
+/**
+ * The game server extracts the platform from the client User-Agent
+ * (`com.tgc.sky.win` -> `win`, `com.tgc.sky.android` -> `android`). Unknown or
+ * empty values are dropped instead of rejecting the login.
+ */
+function normalizePlatform(value) {
+  const text = String(value || '').trim().toLowerCase();
+  return PLATFORM_RE.test(text) ? text : '';
+}
+
+function issueResourceToken(config, userId, { platform } = {}) {
   const secret = config.cdn.tokenSecret;
   if (!secret) throw new Error('cdn.tokenSecret is not configured');
   const ttl = Number(config.cdn.tokenTtlSeconds || 3600);
+  const normalizedPlatform = normalizePlatform(platform);
   const claims = {
     env: config.cdn.env || 'Beta',
     purpose: ['resources'],
     sub: userId,
   };
+  if (normalizedPlatform) claims.platform = normalizedPlatform;
   const token = jwt.sign(claims, secret, { expiresIn: ttl, algorithm: 'HS256' });
-  return { token, expiresAt: Math.floor(Date.now() / 1000) + ttl };
+  return {
+    token,
+    expiresAt: Math.floor(Date.now() / 1000) + ttl,
+    platform: normalizedPlatform,
+  };
 }
 
 function createApiKeyAuth(config, logger) {
@@ -102,4 +122,5 @@ module.exports = {
   createApiKeyAuth,
   createTokenVerifier,
   extractionToken,
+  normalizePlatform,
 };
